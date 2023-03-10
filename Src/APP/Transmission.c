@@ -15,6 +15,9 @@ BCPFrameTypeDef upper_tx_all_data[FRAME_NUM];
 BCPFrameTypeDef upper_tx_data;
 BCPRpyTypeDef rpy_rx_data;
 BCPRpyTypeDef rpy_tx_data;
+
+BCPGimStateTypeDef gim_state_data;   // 云台状态数据
+
 float testdata[4]={0};
 RecvFrameTypeDef auto_rx_data;
 //初始化自瞄发送帧
@@ -36,12 +39,29 @@ extern volatile float yaw_angle_ref_v;
 
 extern uint8_t USB_SEND_OK;
 
+// 都发了些什么？
+//  - cm_data: 发送给底盘的 角度数据
+//  - auto_tx_data: 发送给上位机 用于自瞄的 （目前只传了pitch、yaw角度以及云台控制模式以及旋转方向
+//  - rpy_tx_data: 通过usb发送给 上位机的 欧拉角数据
+//  - testdata: 测试数据
+
+// xxx_data 和 xxx_buffer 是什么关系？
+//  - xxx_data 是包含了帧头（帧尾）的完整的整个数据帧data，xxx_buffer是单纯的数据部分。在接下来的处理中加上帧头（帧尾）变成 xxx_data
+
+// 这些角度都是什么？
+//  - xxx_angle_fdb: 反馈角度（单位：degree） 用imu反馈的值减去offset(归中完成时的imu角度）得到
+//  - xxx_relative_angle：相对（归中值）角度（单位：degree）（用电机编码器的值和写死的归中完成的值算出来的）
+//  - xxx_angle_ref：期望角度（单位：degree
+//  - gim.xxx_offset_angle：归中完成时imu的角度值。一开始使用 xxx_relative_angle 作为现在反馈角度（xxx_angle_fdb)，在得到这个值之后就用这个了（imu更精确）
+//  - 同理，后面接了v就是指角速度
 
 void transmission_task(void const * argument)
 {
     int8_t rpy_tx_buffer[FRAME_RPY_LEN] = {0} ;
     int32_t rpy_data = 0;
     uint32_t *gimbal_rpy = (uint32_t *)&rpy_data;
+
+    int8_t gim_state_tx_buffer[GIMBAL_STATE_LEN] = {0} ;
 
     int8_t imu_tx_buffer[FRAME_IMU_LEN] = {0} ;
     int32_t imu_data = 0;
@@ -50,6 +70,7 @@ void transmission_task(void const * argument)
     __HAL_UART_ENABLE_IT(&huart1,UART_IT_RXNE);
     uint32_t transmission_wake_time = osKernelSysTick();
 
+    // 这里是发送数据，云台接收数据在 `usbd_cdc_if.c` 中的**回调函数** CDC_Receive_FS() 里进行处理。
     while (1)
     {
         /*给下板发送数据*/
@@ -63,14 +84,15 @@ void transmission_task(void const * argument)
         testdata[1]=-AHRS.Roll;
         testdata[2]=-AHRS.Yaw;
 
+// imu.angle_x - gim.yaw_offset_angle , 就是 yaw_angle_fdb，pitch同理
         /* USB发送角度帧 */
         rpy_tx_buffer[0] = 0;
-        rpy_data = (imu.angle_x- gim.yaw_offset_angle) * 1000;
+        rpy_data = (imu.angle_x - gim.yaw_offset_angle) * 1000;
         rpy_tx_buffer[1] = *gimbal_rpy;
         rpy_tx_buffer[2] = *gimbal_rpy >> 8;
         rpy_tx_buffer[3] = *gimbal_rpy >> 16;
         rpy_tx_buffer[4] = *gimbal_rpy >> 24;
-        rpy_data = (imu.angle_y-gim.pit_offset_angle) * 1000;
+        rpy_data = (imu.angle_y - gim.pit_offset_angle) * 1000;
         rpy_tx_buffer[5] = *gimbal_rpy;
         rpy_tx_buffer[6] = *gimbal_rpy >> 8;
         rpy_tx_buffer[7] = *gimbal_rpy >> 16;
@@ -81,8 +103,18 @@ void transmission_task(void const * argument)
         rpy_tx_buffer[11] = *gimbal_rpy >> 16;
         rpy_tx_buffer[12] = *gimbal_rpy >> 24;
 
+        /* 云台状态数据帧 */
+        /* 后3位暂时没用上，留空备用 */
+        gim_state_tx_buffer[0] = gim.ctrl_mode;
+        gim_state_tx_buffer[1] = 0;
+        gim_state_tx_buffer[2] = 0;
+        gim_state_tx_buffer[3] = 0;
+
         Add_Frame_To_Upper(GIMBAL, rpy_tx_buffer);
         CDC_Transmit_FS((uint8_t*)&rpy_tx_data, sizeof(rpy_tx_data));
+
+        Add_Frame_To_Upper(GIMBAL_STATE, gim_state_tx_buffer);
+        CDC_Transmit_FS((uint8_t*)&gim_state_data, sizeof(gim_state_data));
 
         osDelayUntil(&transmission_wake_time, 1);
     }
@@ -101,7 +133,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
         angle_history[i]=yaw_angle_fdb;
         angle_history[i+1]=pit_angle_fdb;
         auto_tx_data.index++;
-        HAL_GPIO_TogglePin(GPIOH,GPIO_PIN_12);
+        HAL_GPIO_TogglePin(GPIOH,CAM_IO_Pin);
     }
 }
 
